@@ -238,10 +238,14 @@ public class SimpleWordlist extends JPanel implements ActionListener, ListDataLi
         }
         // 无换行符号，添加到列表
         if (lines == null || lines.length == 0) {
-            mListModel.addElement(text);
+            String trimmed = text.trim();
+            if (StringUtils.isNotEmpty(trimmed)) {
+                mListModel.addElement(trimmed);
+            }
         } else {
-            // 过滤空的字符串，转换为 List 实例
+            // 去除每行首尾空格，过滤空的字符串，转换为 List 实例
             List<String> list = Arrays.stream(lines)
+                    .map(String::trim)
                     .filter(StringUtils::isNotEmpty)
                     .collect(Collectors.toList());
             // 添加到列表展示
