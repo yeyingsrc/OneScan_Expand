@@ -146,7 +146,7 @@ On Windows:
 Default output:
 
 ```text
-extender/target/OneScan_Dev-v1.1.5.jar
+extender/target/OneScan_Dev-v1.1.4.jar
 ```
 
 ---
