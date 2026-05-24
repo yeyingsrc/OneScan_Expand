@@ -14,6 +14,7 @@ import burp.vaycore.onescan.common.*;
 import burp.vaycore.onescan.info.OneScanInfoTab;
 import burp.vaycore.onescan.manager.CollectManager;
 import burp.vaycore.onescan.manager.FpManager;
+import burp.vaycore.onescan.manager.TaskPersistenceManager;
 import burp.vaycore.onescan.manager.WordlistManager;
 import burp.vaycore.onescan.ui.tab.DataBoardTab;
 import burp.vaycore.onescan.ui.tab.FingerprintTab;
@@ -351,6 +352,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
             mDataBoardTab.refreshFpCacheStatus();
         });
         mStatusRefresh.start();
+        mDataBoardTab.refreshAutoSaveTimer();
     }
 
     @Override
@@ -2099,7 +2101,13 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
             onClearHistory();
             return;
         }
-        mCurrentReqResp = (IHttpRequestResponse) data.getReqResp();
+        if (!(data.getReqResp() instanceof IHttpRequestResponse reqResp)) {
+            mCurrentReqResp = null;
+            mRequestTextEditor.setMessage(EMPTY_BYTES, true);
+            mResponseTextEditor.setMessage(EMPTY_BYTES, false);
+            return;
+        }
+        mCurrentReqResp = reqResp;
         // 加载请求、响应数据包
         byte[] hintBytes = mHelpers.stringToBytes(L.get("message_editor_loading"));
         mRequestTextEditor.setMessage(hintBytes, true);
@@ -2231,10 +2239,10 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
             return;
         }
         for (TaskData data : list) {
-            if (data.getReqResp() == null) {
+            if (!(data.getReqResp() instanceof IHttpRequestResponse reqResp)) {
                 continue;
             }
-            byte[] reqBytes = ((IHttpRequestResponse) data.getReqResp()).getRequest();
+            byte[] reqBytes = reqResp.getRequest();
             String url = data.getHost() + data.getUrl();
             try {
                 URL u = new URL(url);
@@ -2252,10 +2260,10 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
 
     @Override
     public byte[] getBodyByTaskData(TaskData data) {
-        if (data == null || data.getReqResp() == null) {
+        if (data == null || !(data.getReqResp() instanceof IHttpRequestResponse reqResp)) {
             return new byte[]{};
         }
-        mCurrentReqResp = (IHttpRequestResponse) data.getReqResp();
+        mCurrentReqResp = reqResp;
         byte[] respBytes = mCurrentReqResp.getResponse();
         if (respBytes == null || respBytes.length == 0) {
             return new byte[]{};
@@ -2291,6 +2299,11 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                 break;
             case OtherTab.EVENT_UNLOAD_PLUGIN:
                 mCallbacks.unloadExtension();
+                break;
+            case OtherTab.EVENT_REFRESH_DATA_PERSISTENCE:
+                if (mDataBoardTab != null) {
+                    mDataBoardTab.refreshAutoSaveTimer();
+                }
                 break;
             case DataBoardTab.EVENT_IMPORT_URL:
                 importUrl((List<?>) params[0]);
@@ -2382,6 +2395,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         // 关闭数据收集线程池
         count = CollectManager.closeThreadPool();
         Logger.info("Close: data collection thread pool completed. Task %d records.", count);
+        TaskPersistenceManager.close();
         // 清除数据收集的去重过滤集合
         count = CollectManager.getRepeatFilterCount();
         CollectManager.clearRepeatFilter();
@@ -2418,6 +2432,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                 count = taskTable.getTaskCount();
                 taskTable.clearAll();
             }
+            mDataBoardTab.closeAutoSaveTimer();
             // 关闭导入 URL 窗口
             mDataBoardTab.closeImportUrlWindow();
         }

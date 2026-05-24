@@ -40,6 +40,10 @@ public class Config {
     public static final String KEY_INCLUDE_METHOD = "include-method";
     public static final String KEY_WORDLIST_PATH = "dict-path";
     public static final String KEY_DATABOARD_FILTER_RULES = "databoard-filter-rules";
+    public static final String KEY_DATA_PERSISTENCE_ENABLED = "data-persistence-enabled";
+    public static final String KEY_DATA_PERSISTENCE_DB_PATH = "data-persistence-db-path";
+    public static final String KEY_DATA_PERSISTENCE_AUTO_SAVE_INTERVAL = "data-persistence-auto-save-interval";
+    public static final String KEY_DATA_PERSISTENCE_FIELDS = "data-persistence-fields";
     public static final String KEY_FOLLOW_REDIRECT = "follow-redirect";
     public static final String KEY_REDIRECT_COOKIES_FOLLOW = "redirect-cookies-follow";
     public static final String KEY_REDIRECT_TARGET_HOST_LIMIT = "redirect-target-host-limit";
@@ -88,6 +92,10 @@ public class Config {
                 "woff2|xbm|xls|xlsx|xpm|xul|xwd|zip");
         initDefaultConfig(Config.KEY_INCLUDE_METHOD, "GET|POST");
         initDefaultConfig(Config.KEY_WORDLIST_PATH, getWorkDir() + "wordlist");
+        initDefaultConfig(Config.KEY_DATA_PERSISTENCE_ENABLED, "false");
+        initDefaultConfig(Config.KEY_DATA_PERSISTENCE_DB_PATH, getWorkDir() + "onescan-data.sqlite");
+        initDefaultConfig(Config.KEY_DATA_PERSISTENCE_AUTO_SAVE_INTERVAL, "60");
+        initDefaultConfig(Config.KEY_DATA_PERSISTENCE_FIELDS, "from,method,host,url,title,ip,status,length,color");
         initDefaultConfig(Config.KEY_FOLLOW_REDIRECT, "true");
         initDefaultConfig(Config.KEY_REDIRECT_COOKIES_FOLLOW, "true");
         initDefaultConfig(Config.KEY_REDIRECT_TARGET_HOST_LIMIT, "true");

@@ -3,6 +3,7 @@ package burp.vaycore.onescan.ui.tab;
 import burp.vaycore.common.filter.FilterRule;
 import burp.vaycore.common.filter.TableFilter;
 import burp.vaycore.common.filter.TableFilterPanel;
+import burp.vaycore.common.helper.UIHelper;
 import burp.vaycore.common.layout.HLayout;
 import burp.vaycore.common.layout.VLayout;
 import burp.vaycore.common.utils.IPUtils;
@@ -15,9 +16,11 @@ import burp.vaycore.onescan.common.DialogCallbackAdapter;
 import burp.vaycore.onescan.common.L;
 import burp.vaycore.onescan.common.OnFpColumnModifyListener;
 import burp.vaycore.onescan.manager.FpManager;
+import burp.vaycore.onescan.manager.TaskPersistenceManager;
 import burp.vaycore.onescan.ui.base.BaseTab;
 import burp.vaycore.onescan.ui.widget.DividerLine;
 import burp.vaycore.onescan.ui.widget.ImportUrlWindow;
+import burp.vaycore.onescan.ui.widget.TaskFieldSelectionPanel;
 import burp.vaycore.onescan.ui.widget.TaskTable;
 
 import javax.swing.*;
@@ -26,6 +29,7 @@ import javax.swing.table.AbstractTableModel;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -52,6 +56,8 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
     private JLabel mLFTaskStatus;
     private JLabel mFpCacheStatus;
     private JLabel mTaskHistoryStatus;
+    private Timer mAutoSaveTimer;
+    private long mLastAutoSavedVersion = -1L;
 
     @Override
     protected void initData() {
@@ -159,6 +165,21 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         clearBtn.setActionCommand("clear-history");
         clearBtn.addActionListener(this);
         panel.add(clearBtn);
+        JButton saveStoredBtn = new JButton(L.get("save"));
+        saveStoredBtn.setToolTipText(L.get("save_stored_data"));
+        saveStoredBtn.setActionCommand("save-stored-data");
+        saveStoredBtn.addActionListener(this);
+        panel.add(saveStoredBtn);
+        JButton importStoredBtn = new JButton(L.get("import_data_short"));
+        importStoredBtn.setToolTipText(L.get("import_stored_data"));
+        importStoredBtn.setActionCommand("import-stored-data");
+        importStoredBtn.addActionListener(this);
+        panel.add(importStoredBtn);
+        JButton exportBtn = new JButton(L.get("export_data_short"));
+        exportBtn.setToolTipText(L.get("export_stored_data"));
+        exportBtn.setActionCommand("export-stored-data");
+        exportBtn.addActionListener(this);
+        panel.add(exportBtn);
         // 撑开布局
         panel.add(new JPanel(), "1w");
         // 过滤设置
@@ -267,6 +288,15 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
             case "filter-data":
                 showSetupFilterDialog();
                 break;
+            case "export-stored-data":
+                exportStoredData();
+                break;
+            case "import-stored-data":
+                importStoredData();
+                break;
+            case "save-stored-data":
+                saveStoredData(true);
+                break;
         }
     }
 
@@ -328,6 +358,92 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         }
         mTaskTable.clearAll();
         refreshTaskHistoryStatus();
+    }
+
+    private void saveStoredData(boolean showTips) {
+        if (mTaskTable == null) {
+            return;
+        }
+        try {
+            long dataVersion = mTaskTable.getDataVersion();
+            if (!showTips && dataVersion == mLastAutoSavedVersion) {
+                return;
+            }
+            List<TaskData> items = mTaskTable.getTaskDataList();
+            if (items.isEmpty()) {
+                if (showTips) {
+                    UIHelper.showTipsDialog(L.get("data_persistence_no_current_data"));
+                }
+                return;
+            }
+            TaskPersistenceManager.SaveResult result = TaskPersistenceManager.persistSnapshot(items);
+            if (showTips) {
+                if (result.count() <= 0) {
+                    UIHelper.showTipsDialog(L.get("data_persistence_disabled_hint"));
+                } else {
+                    UIHelper.showTipsDialog(L.get("save_stored_data_success", result.label(), result.count()));
+                }
+            } else {
+                mLastAutoSavedVersion = dataVersion;
+            }
+        } catch (Exception ex) {
+            if (showTips) {
+                UIHelper.showTipsDialog(L.get("error_hint", ex.getMessage()));
+            }
+        }
+    }
+
+    private void exportStoredData() {
+        TaskFieldSelectionPanel fieldPanel = new TaskFieldSelectionPanel(TaskPersistenceManager.getConfiguredFieldKeys());
+        JScrollPane scrollPane = new JScrollPane(fieldPanel);
+        scrollPane.setPreferredSize(new Dimension(420, 220));
+        int ret = JOptionPane.showConfirmDialog(this, scrollPane, L.get("export_stored_data"),
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (ret != JOptionPane.OK_OPTION) {
+            return;
+        }
+        String defaultPath = new File(Config.getWorkDir(), "onescan-export.csv").getAbsolutePath();
+        String selectedPath = UIHelper.selectFileDialog(L.get("select_a_file"), defaultPath);
+        if (selectedPath == null || selectedPath.isEmpty()) {
+            return;
+        }
+        try {
+            int count = TaskPersistenceManager.exportCsv(new File(selectedPath), fieldPanel.getSelectedFieldKeys());
+            UIHelper.showTipsDialog(L.get("export_stored_data_success", count, selectedPath));
+        } catch (Exception ex) {
+            UIHelper.showTipsDialog(L.get("error_hint", ex.getMessage()));
+        }
+    }
+
+    private void importStoredData() {
+        try {
+            List<TaskPersistenceManager.HistoryLabel> labels = TaskPersistenceManager.listLabels();
+            if (labels.isEmpty()) {
+                UIHelper.showTipsDialog(L.get("data_persistence_no_history"));
+                return;
+            }
+            JComboBox<TaskPersistenceManager.HistoryLabel> labelBox = new JComboBox<>(
+                    labels.toArray(new TaskPersistenceManager.HistoryLabel[0]));
+            JPanel panel = new JPanel(new BorderLayout(5, 5));
+            panel.add(new JLabel(L.get("select_data_label")), BorderLayout.NORTH);
+            panel.add(labelBox, BorderLayout.CENTER);
+            int ret = JOptionPane.showConfirmDialog(this, panel, L.get("import_stored_data"),
+                    JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+            if (ret != JOptionPane.OK_OPTION) {
+                return;
+            }
+            TaskPersistenceManager.HistoryLabel selected =
+                    (TaskPersistenceManager.HistoryLabel) labelBox.getSelectedItem();
+            if (selected == null) {
+                return;
+            }
+            List<TaskData> items = TaskPersistenceManager.loadTaskDataByLabel(selected.label());
+            mTaskTable.loadTaskData(items);
+            refreshTaskHistoryStatus();
+            UIHelper.showTipsDialog(L.get("import_stored_data_success", selected.label(), items.size()));
+        } catch (Exception ex) {
+            UIHelper.showTipsDialog(L.get("error_hint", ex.getMessage()));
+        }
     }
 
     /**
@@ -421,6 +537,36 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         }
         String message = L.get("status_bar_fingerprint_cache", FpManager.getCacheCount());
         mFpCacheStatus.setText(message);
+    }
+
+    public void refreshAutoSaveTimer() {
+        int interval = TaskPersistenceManager.getAutoSaveIntervalSeconds();
+        if (!TaskPersistenceManager.isEnabled() || interval <= 0) {
+            stopAutoSaveTimer();
+            return;
+        }
+        int delay = interval * 1000;
+        if (mAutoSaveTimer != null && mAutoSaveTimer.getDelay() == delay) {
+            if (!mAutoSaveTimer.isRunning()) {
+                mAutoSaveTimer.start();
+            }
+            return;
+        }
+        stopAutoSaveTimer();
+        mAutoSaveTimer = new Timer(delay, e -> saveStoredData(false));
+        mAutoSaveTimer.setInitialDelay(delay);
+        mAutoSaveTimer.start();
+    }
+
+    public void closeAutoSaveTimer() {
+        stopAutoSaveTimer();
+    }
+
+    private void stopAutoSaveTimer() {
+        if (mAutoSaveTimer != null) {
+            mAutoSaveTimer.stop();
+            mAutoSaveTimer = null;
+        }
     }
 
     /**

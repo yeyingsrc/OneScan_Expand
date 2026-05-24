@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(mvn -q -pl extender compile -DskipTests)"
-    ]
-  }
-}

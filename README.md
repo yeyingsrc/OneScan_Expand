@@ -2,11 +2,8 @@
 
 OneScan_TX is a Burp Suite extension project based on **OneScan**.
 
-- features
-- runtime requirements
-- component and dependency versions
-- DrissionPage installation
-- build and load steps
+This branch has been updated for modern Burp builds and now targets **Java 21**.
+It is no longer compatible with **JDK 8**.
 
 ---
 
@@ -17,6 +14,10 @@ OneScan_TX is a Burp Suite extension project based on **OneScan**.
 - Centralized scan result display
 - Request/response summary viewing
 - Task stop, history clear, and URL import
+- Local data import/export based on SQLite
+- Manual save and auto-save for persisted data
+- Historical data lookup by timestamp label
+- Configurable field-level selective persistence
 
 ### Fingerprint Identification
 
@@ -66,10 +67,13 @@ This project depends on:
 - `montoya-api 2023.12.1`
 
 A relatively recent Burp Suite version is recommended.
+The plugin still works with older Burp-based projects that load external extensions, but the code itself now requires a
+modern Java toolchain to build.
 
 ### Java
 
-- **JDK 1.8**
+- **JDK 21**
+- The project now targets Java 21 bytecode and no longer supports JDK 8.
 
 ### Python
 
@@ -130,13 +134,19 @@ OneScan_TX/
 Run in the project root:
 
 ```bash
-mvn clean package
+./mvnw clean package
+```
+
+On Windows:
+
+```powershell
+.\mvnw.cmd clean package
 ```
 
 Default output:
 
 ```text
-extender/target/OneScan_Dev-v1.1.0.jar
+extender/target/OneScan_Dev-v1.1.5.jar
 ```
 
 ---

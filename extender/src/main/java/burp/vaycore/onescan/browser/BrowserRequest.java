@@ -1,22 +1,14 @@
 package burp.vaycore.onescan.browser;
 
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
-public class BrowserRequest {
+public record BrowserRequest(String method, String url, List<String> headers, byte[] body) {
 
-    private final String method;
-    private final String url;
-    private final List<String> headers;
-    private final byte[] body;
-
-    private BrowserRequest(String method, String url, List<String> headers, byte[] body) {
-        this.method = method == null ? "" : method.trim().toUpperCase();
-        this.url = url == null ? "" : url.trim();
-        this.headers = Collections.unmodifiableList(new ArrayList<String>(headers == null
-                ? Collections.<String>emptyList() : headers));
-        this.body = body == null ? new byte[0] : body.clone();
+    public BrowserRequest {
+        method = method == null ? "" : method.trim().toUpperCase();
+        url = url == null ? "" : url.trim();
+        headers = List.copyOf(headers == null ? List.of() : headers);
+        body = body == null ? new byte[0] : body.clone();
     }
 
     public static BrowserRequest of(String method, String url, List<String> headers, byte[] body) {
@@ -39,6 +31,11 @@ public class BrowserRequest {
 
     public List<String> getHeaders() {
         return headers;
+    }
+
+    @Override
+    public byte[] body() {
+        return body.clone();
     }
 
     public byte[] getBody() {

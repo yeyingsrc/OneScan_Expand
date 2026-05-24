@@ -25,9 +25,10 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.net.MalformedURLException;
 import java.net.URL;
-import java.util.List;
 import java.util.*;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 /**
@@ -317,6 +318,29 @@ public class TaskTable extends JTable implements ActionListener {
      */
     public void addTaskData(TaskData data) {
         mTaskTableModel.add(data);
+    }
+
+    public void loadTaskData(List<TaskData> items) {
+        mTaskTableModel.replaceAll(items);
+        clearSelection();
+        if (mOnTaskTableEventListener != null) {
+            if (getRowCount() > 0) {
+                setRowSelectionInterval(0, 0);
+                mLastSelectedRow = convertRowIndexToModel(0);
+                mOnTaskTableEventListener.onChangeSelection(getTaskData(0));
+            } else {
+                mLastSelectedRow = -1;
+                mOnTaskTableEventListener.onChangeSelection(null);
+            }
+        }
+    }
+
+    public List<TaskData> getTaskDataList() {
+        return mTaskTableModel.getDataSnapshot();
+    }
+
+    public long getDataVersion() {
+        return mTaskTableModel.getDataVersion();
     }
 
     /**
@@ -788,11 +812,13 @@ public class TaskTable extends JTable implements ActionListener {
         };
         private final List<TaskData> mData;
         private final AtomicInteger mCounter;
+        private final AtomicLong mDataVersion;
         private final DataTableItemLoader<TaskData> mItemLoader;
 
         public TaskTableModel() {
             mData = Collections.synchronizedList(new ArrayList<>());
             mCounter = new AtomicInteger();
+            mDataVersion = new AtomicLong();
             mItemLoader = new DataTableItemLoader<>(this, 500);
         }
 
@@ -818,6 +844,7 @@ public class TaskTable extends JTable implements ActionListener {
                 int firstRow = getRowCount();
                 mData.addAll(validItems);
                 int lastRow = getRowCount() - 1;
+                mDataVersion.incrementAndGet();
                 fireTableRowsInserted(firstRow, lastRow);
             }
         }
@@ -827,12 +854,36 @@ public class TaskTable extends JTable implements ActionListener {
                 return;
             }
             mData.removeAll(list);
+            mDataVersion.incrementAndGet();
             fireTableDataChanged();
         }
 
         public synchronized void clearAll() {
             mData.clear();
+            mDataVersion.incrementAndGet();
             fireTableDataChanged();
+        }
+
+        public synchronized void replaceAll(List<TaskData> items) {
+            mItemLoader.flush();
+            mData.clear();
+            if (items != null && !items.isEmpty()) {
+                mData.addAll(items.stream().filter(Objects::nonNull).collect(Collectors.toList()));
+            }
+            int maxId = mData.stream().mapToInt(TaskData::getId).max().orElse(-1);
+            mCounter.set(maxId + 1);
+            mDataVersion.incrementAndGet();
+            fireTableDataChanged();
+        }
+
+        public synchronized List<TaskData> getDataSnapshot() {
+            mItemLoader.flush();
+            return new ArrayList<>(mData);
+        }
+
+        public long getDataVersion() {
+            mItemLoader.flush();
+            return mDataVersion.get();
         }
 
         @Override

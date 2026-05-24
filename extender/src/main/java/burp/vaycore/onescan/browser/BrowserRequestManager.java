@@ -31,7 +31,7 @@ public class BrowserRequestManager {
 
     public synchronized BrowserResult navigate(String url, String browserType, String browserBinaryPath,
                                                long timeoutMillis, String workDir, String pythonPath) {
-        BrowserRequest request = BrowserRequest.of("GET", url, Collections.<String>emptyList(), new byte[0]);
+        BrowserRequest request = BrowserRequest.of("GET", url, List.of(), new byte[0]);
         return navigate(request, browserType, browserBinaryPath, timeoutMillis, workDir, pythonPath, false);
     }
 
@@ -663,22 +663,14 @@ public class BrowserRequestManager {
         return DEFAULT_BRIDGE_TIMEOUT_EXTRA_MILLIS;
     }
 
-    public static class BrowserResult {
-        private final int status;
-        private final String reason;
-        private final Map<String, String> headers;
-        private final byte[] bodyBytes;
-        private final String finalUrl;
-        private final String title;
-
-        private BrowserResult(int status, String reason, Map<String, String> headers,
-                              byte[] bodyBytes, String finalUrl, String title) {
-            this.status = status;
-            this.reason = reason == null ? "" : reason;
-            this.headers = headers == null ? new LinkedHashMap<String, String>() : headers;
-            this.bodyBytes = bodyBytes == null ? new byte[0] : bodyBytes;
-            this.finalUrl = finalUrl == null ? "" : finalUrl;
-            this.title = title == null ? "" : title;
+    public record BrowserResult(int status, String reason, Map<String, String> headers, byte[] bodyBytes,
+                                String finalUrl, String title) {
+        public BrowserResult {
+            reason = reason == null ? "" : reason;
+            headers = Collections.unmodifiableMap(headers == null ? new LinkedHashMap<>() : new LinkedHashMap<>(headers));
+            bodyBytes = bodyBytes == null ? new byte[0] : bodyBytes.clone();
+            finalUrl = finalUrl == null ? "" : finalUrl;
+            title = title == null ? "" : title;
         }
 
         public int getStatus() {
@@ -694,7 +686,7 @@ public class BrowserRequestManager {
         }
 
         public byte[] getBodyBytes() {
-            return bodyBytes;
+            return bodyBytes.clone();
         }
 
         public String getFinalUrl() {
