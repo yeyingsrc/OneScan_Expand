@@ -1,6 +1,6 @@
-# OneScan_TX
+# OneScan_Expand
 
-OneScan_TX is a Burp Suite extension project based on **OneScan**.
+OneScan_Expand is a Burp Suite extension project based on **OneScan**.
 
 This branch has been updated for modern Burp builds and now targets **Java 21**.
 It is no longer compatible with **JDK 8**.
