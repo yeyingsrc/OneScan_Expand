@@ -11,7 +11,7 @@ public interface Constants {
 
     // 插件信息
     String PLUGIN_NAME = "OneScan_Expand";
-    String PLUGIN_VERSION = "1.1.4";
+    String PLUGIN_VERSION = "1.1.5";
     boolean DEBUG = false;
 
     // 插件启动显示的信息
@@ -23,7 +23,7 @@ public interface Constants {
             "  Developer: Rural.Dog\n" +
             "  Developer:人间小福星\n"+
             "  Github: https://github.com/Zmz-c/OneScan_Expand\n" +
-            "  Note:新增数据储存功能，历史数据不再丢失，可选数据储存时间，全面升级到JDK21，不再支持jdk1.8,性能优化\n" +
+            "  Note:调整UI，优化性能速度，解决大数据下的性能问题\n" +
             "#############################################\n";
 
     // 插件卸载显示的信息

@@ -32,6 +32,8 @@ import java.awt.event.ActionListener;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 数据看板
@@ -58,6 +60,12 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
     private JLabel mTaskHistoryStatus;
     private Timer mAutoSaveTimer;
     private long mLastAutoSavedVersion = -1L;
+    private final ExecutorService mSaveExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(r, "OneScan-data-save");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private long mLastAutoSaveQueuedVersion = -1L;
 
     @Override
     protected void initData() {
@@ -165,21 +173,10 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         clearBtn.setActionCommand("clear-history");
         clearBtn.addActionListener(this);
         panel.add(clearBtn);
-        JButton saveStoredBtn = new JButton(L.get("save"));
-        saveStoredBtn.setToolTipText(L.get("save_stored_data"));
-        saveStoredBtn.setActionCommand("save-stored-data");
-        saveStoredBtn.addActionListener(this);
-        panel.add(saveStoredBtn);
-        JButton importStoredBtn = new JButton(L.get("import_data_short"));
-        importStoredBtn.setToolTipText(L.get("import_stored_data"));
-        importStoredBtn.setActionCommand("import-stored-data");
-        importStoredBtn.addActionListener(this);
-        panel.add(importStoredBtn);
-        JButton exportBtn = new JButton(L.get("export_data_short"));
-        exportBtn.setToolTipText(L.get("export_stored_data"));
-        exportBtn.setActionCommand("export-stored-data");
-        exportBtn.addActionListener(this);
-        panel.add(exportBtn);
+        JButton dataProcessingBtn = new JButton(L.get("data_processing"));
+        dataProcessingBtn.setToolTipText(L.get("data_processing"));
+        dataProcessingBtn.addActionListener(e -> showDataProcessingMenu(dataProcessingBtn));
+        panel.add(dataProcessingBtn);
         // 撑开布局
         panel.add(new JPanel(), "1w");
         // 过滤设置
@@ -288,6 +285,9 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
             case "filter-data":
                 showSetupFilterDialog();
                 break;
+            case "data-processing-menu":
+                showDataProcessingMenu((Component) e.getSource());
+                break;
             case "export-stored-data":
                 exportStoredData();
                 break;
@@ -298,6 +298,22 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
                 saveStoredData(true);
                 break;
         }
+    }
+
+    private void showDataProcessingMenu(Component anchor) {
+        JPopupMenu menu = new JPopupMenu();
+        addDataProcessingMenuItem(menu, L.get("save"), L.get("save_stored_data"), "save-stored-data");
+        addDataProcessingMenuItem(menu, L.get("import_data_short"), L.get("import_stored_data"), "import-stored-data");
+        addDataProcessingMenuItem(menu, L.get("export_data_short"), L.get("export_stored_data"), "export-stored-data");
+        menu.show(anchor, 0, anchor.getHeight());
+    }
+
+    private void addDataProcessingMenuItem(JPopupMenu menu, String text, String tooltip, String actionCommand) {
+        JMenuItem item = new JMenuItem(text);
+        item.setToolTipText(tooltip);
+        item.setActionCommand(actionCommand);
+        item.addActionListener(this);
+        menu.add(item);
     }
 
     /**
@@ -365,27 +381,48 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
             return;
         }
         try {
-            long dataVersion = mTaskTable.getDataVersion();
-            if (!showTips && dataVersion == mLastAutoSavedVersion) {
+            TaskTable.TaskSnapshot snapshot = mTaskTable.getTaskSnapshot();
+            if (!showTips && snapshot.version() == mLastAutoSavedVersion) {
                 return;
             }
-            List<TaskData> items = mTaskTable.getTaskDataList();
+            if (!showTips && snapshot.version() == mLastAutoSaveQueuedVersion) {
+                return;
+            }
+            List<TaskData> items = snapshot.items();
             if (items.isEmpty()) {
                 if (showTips) {
                     UIHelper.showTipsDialog(L.get("data_persistence_no_current_data"));
                 }
                 return;
             }
-            TaskPersistenceManager.SaveResult result = TaskPersistenceManager.persistSnapshot(items);
-            if (showTips) {
-                if (result.count() <= 0) {
-                    UIHelper.showTipsDialog(L.get("data_persistence_disabled_hint"));
-                } else {
-                    UIHelper.showTipsDialog(L.get("save_stored_data_success", result.label(), result.count()));
-                }
-            } else {
-                mLastAutoSavedVersion = dataVersion;
+            if (!showTips) {
+                mLastAutoSaveQueuedVersion = snapshot.version();
             }
+            Runnable task = () -> {
+                try {
+                    TaskPersistenceManager.SaveResult result = TaskPersistenceManager.persistSnapshot(items);
+                    if (showTips) {
+                        SwingUtilities.invokeLater(() -> {
+                            if (result.count() <= 0) {
+                                UIHelper.showTipsDialog(L.get("data_persistence_disabled_hint"));
+                            } else {
+                                UIHelper.showTipsDialog(L.get("save_stored_data_success", result.label(), result.count()));
+                            }
+                        });
+                    } else {
+                        mLastAutoSavedVersion = snapshot.version();
+                        mLastAutoSaveQueuedVersion = snapshot.version();
+                    }
+                } catch (Exception ex) {
+                    if (!showTips) {
+                        mLastAutoSaveQueuedVersion = mLastAutoSavedVersion;
+                    }
+                    if (showTips) {
+                        SwingUtilities.invokeLater(() -> UIHelper.showTipsDialog(L.get("error_hint", ex.getMessage())));
+                    }
+                }
+            };
+            mSaveExecutor.execute(task);
         } catch (Exception ex) {
             if (showTips) {
                 UIHelper.showTipsDialog(L.get("error_hint", ex.getMessage()));
@@ -567,6 +604,10 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
             mAutoSaveTimer.stop();
             mAutoSaveTimer = null;
         }
+    }
+
+    public void closeDataSaveExecutor() {
+        mSaveExecutor.shutdownNow();
     }
 
     /**

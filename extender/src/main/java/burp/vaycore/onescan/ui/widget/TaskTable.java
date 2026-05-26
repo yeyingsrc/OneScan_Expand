@@ -343,6 +343,10 @@ public class TaskTable extends JTable implements ActionListener {
         return mTaskTableModel.getDataVersion();
     }
 
+    public TaskSnapshot getTaskSnapshot() {
+        return mTaskTableModel.getSnapshot();
+    }
+
     /**
      * 获取任务数据
      *
@@ -886,6 +890,11 @@ public class TaskTable extends JTable implements ActionListener {
             return mDataVersion.get();
         }
 
+        public synchronized TaskSnapshot getSnapshot() {
+            mItemLoader.flush();
+            return new TaskSnapshot(new ArrayList<>(mData), mDataVersion.get());
+        }
+
         @Override
         public synchronized int getRowCount() {
             return mData.size();
@@ -945,5 +954,8 @@ public class TaskTable extends JTable implements ActionListener {
             // 任务停止后。取出所有队列数据，添加到列表
             mItemLoader.flush();
         }
+    }
+
+    public record TaskSnapshot(List<TaskData> items, long version) {
     }
 }

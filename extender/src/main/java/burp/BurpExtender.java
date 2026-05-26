@@ -2433,6 +2433,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                 taskTable.clearAll();
             }
             mDataBoardTab.closeAutoSaveTimer();
+            mDataBoardTab.closeDataSaveExecutor();
             // 关闭导入 URL 窗口
             mDataBoardTab.closeImportUrlWindow();
         }
