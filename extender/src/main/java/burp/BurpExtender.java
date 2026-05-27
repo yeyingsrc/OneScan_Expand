@@ -28,7 +28,6 @@ import burp.vaycore.onescan.ui.widget.payloadlist.ProcessingItem;
 import javax.swing.*;
 import javax.swing.Timer;
 import java.awt.*;
-import java.awt.event.ActionListener;
 import java.io.File;
 import java.net.InetAddress;
 import java.net.MalformedURLException;
@@ -81,16 +80,12 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
     private static final String FROM_PROXY = "Proxy";
 
     /**
-     * ç’‡é”‹çœ°é€šè¿‡æµè§ˆå™¨å‘èµ·
+     * 请求来源：浏览器请求
      */
     private static final String FROM_BROWSER = "Browser";
 
     /**
-     * æµè§ˆå™¨è¯·æ±‚ç­‰å¾…è¶…æ—¶æ—¶é—´ï¼ˆæ¯«ç§’ï¼‰
-     */
-
-    /**
-     * æµè§ˆå™¨è¯·æ±‚ç¨³å®šç­‰å¾…æ—¶é—´ï¼ˆæ¯«ç§’ï¼‰
+     * 浏览器请求稳定等待时间（毫秒）
      */
     private static final long BROWSER_REQUEST_SETTLE_TIME = 1500L;
     private static final long BROWSER_TRAFFIC_SUPPRESS_TTL = 5000L;
@@ -100,6 +95,16 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
      * 请求来源：发送到 OneScan 扫描
      */
     private static final String FROM_SEND = "Send";
+
+    /**
+     * 请求来源：右键菜单发送到 OneScan 扫描（Burp 请求）
+     */
+    private static final String FROM_SEND_BURP = "Send (Burp)";
+
+    /**
+     * 请求来源：右键菜单发送到 OneScan 扫描（浏览器请求）
+     */
+    private static final String FROM_SEND_BROWSER = "Send (Browser)";
 
     /**
      * 请求来源：Payload Processing
@@ -134,6 +139,8 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
     private final ConcurrentHashMap<String, Long> mBrowserExpectedRequests = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, BrowserResponseCacheEntry> mBrowserResponseCache = new ConcurrentHashMap<>();
     private final Object mBrowserRequestLock = new Object();
+    private final Object mRequestPauseLock = new Object();
+    private final EnumSet<RequestMode> mPausedRequestModes = EnumSet.noneOf(RequestMode.class);
     private final BrowserRequestManager mBrowserRequestManager = new BrowserRequestManager();
     private final ExecutorService mBrowserCloseExecutor = Executors.newSingleThreadExecutor();
     private final AtomicInteger mTaskOverCounter = new AtomicInteger(0);
@@ -150,6 +157,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
     private IMessageEditor mResponseTextEditor;
     private ExecutorService mTaskThreadPool;
     private ExecutorService mLFTaskThreadPool;
+    private ExecutorService mBrowserTaskThreadPool;
     private ExecutorService mFpThreadPool;
     private ExecutorService mRefreshMsgTask;
     private IHttpRequestResponse mCurrentReqResp;
@@ -252,6 +260,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         this.mHelpers = callbacks.getHelpers();
         this.mTaskThreadPool = Executors.newFixedThreadPool(TASK_THREAD_COUNT);
         this.mLFTaskThreadPool = Executors.newFixedThreadPool(LF_TASK_THREAD_COUNT);
+        this.mBrowserTaskThreadPool = Executors.newSingleThreadExecutor();
         this.mFpThreadPool = Executors.newFixedThreadPool(FP_THREAD_COUNT);
         this.mRefreshMsgTask = Executors.newSingleThreadExecutor();
         this.mCallbacks.setExtensionName(Constants.PLUGIN_NAME + " v" + Constants.PLUGIN_VERSION);
@@ -321,6 +330,19 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                 || isTaskThreadPoolShutdown();
     }
 
+    private RequestMode normalizeTaskMode(RequestMode requestMode) {
+        return requestMode == RequestMode.BROWSER ? RequestMode.BROWSER : RequestMode.BURP;
+    }
+
+    private void waitForRequestMode(RequestMode requestMode) throws InterruptedException {
+        RequestMode taskMode = normalizeTaskMode(requestMode);
+        synchronized (mRequestPauseLock) {
+            while (mPausedRequestModes.contains(taskMode)) {
+                mRequestPauseLock.wait();
+            }
+        }
+    }
+
     private void initView() {
         mOneScan = new OneScan();
         mDataBoardTab = mOneScan.getDataBoardTab();
@@ -333,7 +355,12 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         mRequestTextEditor = mCallbacks.createMessageEditor(this, false);
         mResponseTextEditor = mCallbacks.createMessageEditor(this, false);
         mDataBoardTab.init(mRequestTextEditor.getComponent(), mResponseTextEditor.getComponent());
-        mDataBoardTab.getTaskTable().setOnTaskTableEventListener(this);
+        if (mDataBoardTab.getBurpTaskTable() != null) {
+            mDataBoardTab.getBurpTaskTable().setOnTaskTableEventListener(this);
+        }
+        if (mDataBoardTab.getBrowserTaskTable() != null) {
+            mDataBoardTab.getBrowserTaskTable().setOnTaskTableEventListener(this);
+        }
     }
 
     private void initEvent() {
@@ -359,50 +386,66 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
     public List<JMenuItem> createMenuItems(IContextMenuInvocation invocation) {
         ArrayList<JMenuItem> items = new ArrayList<>();
         // 扫描选定目标
-        JMenuItem sendToOneScanItem = new JMenuItem(L.get("send_to_plugin"));
-        items.add(sendToOneScanItem);
-        sendToOneScanItem.addActionListener((event) -> {
-            final long taskGeneration = captureTaskGeneration();
-            new Thread(() -> runWithTaskGeneration(taskGeneration, () -> {
-            IHttpRequestResponse[] messages = invocation.getSelectedMessages();
-            for (IHttpRequestResponse httpReqResp : messages) {
-                doScan(httpReqResp, FROM_SEND);
-                // 线程池关闭后，停止发送扫描任务
-                if (isTaskStopRequested(taskGeneration)) {
-                    Logger.debug("sendToPlugin: task stop requested, stop sending scan task");
-                    return;
-                }
-            }
-            })).start();
-        });
+        JMenu sendToOneScanMenu = new JMenu(L.get("send_to_plugin"));
+        items.add(sendToOneScanMenu);
+        addSendToOneScanMenuItem(sendToOneScanMenu, invocation, L.get("send_to_plugin_burp"), RequestMode.BURP,
+                FROM_SEND_BURP);
+        addSendToOneScanMenuItem(sendToOneScanMenu, invocation, L.get("send_to_plugin_browser"),
+                RequestMode.BROWSER, FROM_SEND_BROWSER);
         // 选择 Payload 扫描
         List<String> payloadList = WordlistManager.getItemList(WordlistManager.KEY_PAYLOAD);
         if (!payloadList.isEmpty() && payloadList.size() > 1) {
             JMenu menu = new JMenu(L.get("use_payload_scan"));
             items.add(menu);
-            ActionListener listener = (event) -> {
-                final long taskGeneration = captureTaskGeneration();
-                new Thread(() -> runWithTaskGeneration(taskGeneration, () -> {
-                String action = event.getActionCommand();
+            for (String itemName : payloadList) {
+                JMenu payloadMenu = new JMenu(itemName);
+                menu.add(payloadMenu);
+                addPayloadScanMenuItem(payloadMenu, invocation, L.get("send_to_plugin_burp"), itemName,
+                        RequestMode.BURP, FROM_SEND_BURP);
+                addPayloadScanMenuItem(payloadMenu, invocation, L.get("send_to_plugin_browser"), itemName,
+                        RequestMode.BROWSER, FROM_SEND_BROWSER);
+            }
+        }
+        return items;
+    }
+
+    private void addSendToOneScanMenuItem(JMenu menu, IContextMenuInvocation invocation, String name,
+                                          RequestMode requestMode, String from) {
+        JMenuItem item = new JMenuItem(name);
+        menu.add(item);
+        item.addActionListener((event) -> {
+            final long taskGeneration = captureTaskGeneration();
+            new Thread(() -> runWithTaskGeneration(taskGeneration, () -> {
                 IHttpRequestResponse[] messages = invocation.getSelectedMessages();
                 for (IHttpRequestResponse httpReqResp : messages) {
-                    doScan(httpReqResp, FROM_SEND, action);
+                    doScan(httpReqResp, from, requestMode);
+                    if (isTaskStopRequested(taskGeneration)) {
+                        Logger.debug("sendToPlugin: task stop requested, stop sending scan task");
+                        return;
+                    }
+                }
+            })).start();
+        });
+    }
+
+    private void addPayloadScanMenuItem(JMenu menu, IContextMenuInvocation invocation, String name, String payloadItem,
+                                        RequestMode requestMode, String from) {
+        JMenuItem item = new JMenuItem(name);
+        menu.add(item);
+        item.addActionListener((event) -> {
+            final long taskGeneration = captureTaskGeneration();
+            new Thread(() -> runWithTaskGeneration(taskGeneration, () -> {
+                IHttpRequestResponse[] messages = invocation.getSelectedMessages();
+                for (IHttpRequestResponse httpReqResp : messages) {
+                    doScan(httpReqResp, from, payloadItem, requestMode);
                     // 线程池关闭后，停止发送扫描任务
                     if (isTaskStopRequested(taskGeneration)) {
                         Logger.debug("usePayloadScan: task stop requested, stop sending scan task");
                         return;
                     }
                 }
-                })).start();
-            };
-            for (String itemName : payloadList) {
-                JMenuItem item = new JMenuItem(itemName);
-                item.setActionCommand(itemName);
-                item.addActionListener(listener);
-                menu.add(item);
-            }
-        }
-        return items;
+            })).start();
+        });
     }
 
     @Override
@@ -435,10 +478,19 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
 
     private void doScan(IHttpRequestResponse httpReqResp, String from) {
         String item = WordlistManager.getItem(WordlistManager.KEY_PAYLOAD);
-        doScan(httpReqResp, from, item);
+        doScan(httpReqResp, from, item, RequestMode.AUTO);
+    }
+
+    private void doScan(IHttpRequestResponse httpReqResp, String from, RequestMode requestMode) {
+        String item = WordlistManager.getItem(WordlistManager.KEY_PAYLOAD);
+        doScan(httpReqResp, from, item, requestMode);
     }
 
     private void doScan(IHttpRequestResponse httpReqResp, String from, String payloadItem) {
+        doScan(httpReqResp, from, payloadItem, RequestMode.AUTO);
+    }
+
+    private void doScan(IHttpRequestResponse httpReqResp, String from, String payloadItem, RequestMode requestMode) {
         if (httpReqResp == null || httpReqResp.getHttpService() == null) {
             return;
         }
@@ -483,7 +535,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         URL url = getUrlByRequestInfo(info);
         // 原始请求也需要经过 Payload Process 处理（不过需要过滤一些后缀的流量）
         if (!proxyExcludeSuffixFilter(url.getPath())) {
-            runScanTask(httpReqResp, info, null, from);
+            runScanTask(httpReqResp, info, null, from, requestMode);
         } else {
             Logger.debug("proxyExcludeSuffixFilter filter request path: %s", url.getPath());
         }
@@ -529,7 +581,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                 if (UrlUtils.isHTTP(reqPath) && !UrlUtils.isHTTP(item)) {
                     urlPath = reqHost + urlPath;
                 }
-                runScanTask(httpReqResp, info, urlPath, FROM_SCAN);
+                runScanTask(httpReqResp, info, urlPath, FROM_SCAN, requestMode);
             }
         }
     }
@@ -727,6 +779,11 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
      * @param from          请求来源
      */
     private void runScanTask(IHttpRequestResponse httpReqResp, IRequestInfo info, String pathWithQuery, String from) {
+        runScanTask(httpReqResp, info, pathWithQuery, from, RequestMode.AUTO);
+    }
+
+    private void runScanTask(IHttpRequestResponse httpReqResp, IRequestInfo info, String pathWithQuery, String from,
+                             RequestMode requestMode) {
         if (isTaskStopRequested()) {
             Logger.debug("runScanTask: task stop requested, intercept source: %s", from);
             return;
@@ -739,20 +796,20 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
             return;
         }
         IRequestInfo newInfo = mHelpers.analyzeRequest(service, request);
-        String reqId = generateReqId(newInfo, from);
+        String reqId = generateReqId(newInfo, from, requestMode);
         // 如果当前 URL 已经扫描，中止任务
         if (checkRepeatFilterByReqId(reqId)) {
             return;
         }
         // 如果未启用“请求包处理”功能，直接对扫描的任务发起请求
         if (!mDataBoardTab.hasPayloadProcessing()) {
-            doBurpRequest(service, reqId, request, from);
+            doBurpRequest(service, reqId, request, from, requestMode);
             return;
         }
         // 运行已经启用并且需要合并的任务
-        runEnableAndMergeTask(service, reqId, request, from);
+        runEnableAndMergeTask(service, reqId, request, from, requestMode);
         // 运行已经启用并且不需要合并的任务
-        runEnabledWithoutMergeProcessingTask(service, reqId, request);
+        runEnabledWithoutMergeProcessingTask(service, reqId, request, requestMode);
     }
 
     /**
@@ -763,6 +820,10 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
      * @return 失败返回 "null" 字符串
      */
     private String generateReqId(IRequestInfo info, String from) {
+        return generateReqId(info, from, RequestMode.AUTO);
+    }
+
+    private String generateReqId(IRequestInfo info, String from, RequestMode requestMode) {
         if (info == null || StringUtils.isEmpty(from)) {
             return "null";
         }
@@ -778,6 +839,9 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         // 生成重定向请求的请求 ID 值
         if (from.startsWith(FROM_REDIRECT)) {
             return reqHost + reqPath;
+        }
+        if (requestMode != null && requestMode != RequestMode.AUTO) {
+            return requestMode.name() + " " + reqHost + url.getPath();
         }
         // 默认使用 http://x.x.x.x/path/to/index.html 格式作为请求 ID 值
         return reqHost + url.getPath();
@@ -804,14 +868,15 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
      * @param reqRawBytes 请求数据包
      * @param from        请求来源
      */
-    private void runEnableAndMergeTask(IHttpService service, String reqId, byte[] reqRawBytes, String from) {
+    private void runEnableAndMergeTask(IHttpService service, String reqId, byte[] reqRawBytes, String from,
+                                       RequestMode requestMode) {
         // 获取已经启用并且需要合并的“请求包处理”规则
         List<ProcessingItem> processList = getPayloadProcess()
                 .stream().filter(ProcessingItem::isEnabledAndMerge)
                 .collect(Collectors.toList());
         // 如果规则为空，直接发起请求
         if (processList.isEmpty()) {
-            doBurpRequest(service, reqId, reqRawBytes, from);
+            doBurpRequest(service, reqId, reqRawBytes, from, requestMode);
             return;
         }
         byte[] resultBytes = reqRawBytes;
@@ -824,10 +889,10 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
             boolean equals = Arrays.equals(reqRawBytes, resultBytes);
             // 未进行任何处理时，不变更 from 值
             String newFrom = equals ? from : from + "（" + FROM_PROCESS + "）";
-            doBurpRequest(service, reqId, resultBytes, newFrom);
+            doBurpRequest(service, reqId, resultBytes, newFrom, requestMode);
         } else {
             // 如果规则处理异常导致数据返回为空，则发送原来的请求
-            doBurpRequest(service, reqId, reqRawBytes, from);
+            doBurpRequest(service, reqId, reqRawBytes, from, requestMode);
         }
     }
 
@@ -838,7 +903,8 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
      * @param reqId       请求 ID
      * @param reqRawBytes 请求数据包
      */
-    private void runEnabledWithoutMergeProcessingTask(IHttpService service, String reqId, byte[] reqRawBytes) {
+    private void runEnabledWithoutMergeProcessingTask(IHttpService service, String reqId, byte[] reqRawBytes,
+                                                      RequestMode requestMode) {
         final long taskGeneration = resolveTaskGeneration();
         // 遍历规则列表，进行 Payload Processing 处理后，再次请求数据包
         getPayloadProcess().parallelStream().filter(ProcessingItem::isEnabledWithoutMerge)
@@ -857,7 +923,8 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                     if (equals) {
                         return;
                     }
-                    doBurpRequest(service, reqId, requestBytes, FROM_PROCESS + "（" + item.getName() + "）");
+                    doBurpRequest(service, reqId, requestBytes, FROM_PROCESS + "（" + item.getName() + "）",
+                            requestMode);
                 }));
     }
 
@@ -869,7 +936,8 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
      * @param reqRawBytes 请求数据包
      * @param from        请求来源
      */
-    private void doBurpRequest(IHttpService service, String reqId, byte[] reqRawBytes, String from) {
+    private void doBurpRequest(IHttpService service, String reqId, byte[] reqRawBytes, String from,
+                               RequestMode requestMode) {
         final long taskGeneration = resolveTaskGeneration();
         // 线程池关闭后，不接收任何任务
         if (isTaskStopRequested(taskGeneration)) {
@@ -890,7 +958,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                         return;
                     }
                 // 低频任务不进行 QPS 限制
-                if (!isLowFrequencyTask(from) && checkQPSLimit()) {
+                    if (requestMode != RequestMode.BROWSER && !isLowFrequencyTask(from) && checkQPSLimit()) {
                     // 拦截后，将未执行的任务从去重过滤集合中移除
                     sRepeatFilter.remove(reqId);
                     // 任务完成计数
@@ -898,19 +966,38 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                     return;
                 }
                 Logger.debug("Do Send Request id: %s", reqId);
+                    try {
+                        waitForRequestMode(requestMode);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        sRepeatFilter.remove(reqId);
+                        incrementTaskOverCounter(from);
+                        return;
+                    }
+                    if (isTaskStopRequested()) {
+                        sRepeatFilter.remove(reqId);
+                        incrementTaskOverCounter(from);
+                        return;
+                    }
                 // 获取配置的请求重试次数
                 int retryCount = Config.getInt(Config.KEY_RETRY_COUNT);
                 // 发起请求
-                IHttpRequestResponse newReqResp = doMakeHttpRequest(service, reqRawBytes, retryCount);
+                    IHttpRequestResponse newReqResp = doMakeHttpRequest(service, reqRawBytes, retryCount, requestMode);
+                    if (newReqResp == null) {
+                        sRepeatFilter.remove(reqId);
+                        incrementTaskOverCounter(from);
+                        return;
+                    }
                     if (isTaskStopRequested()) {
                         sRepeatFilter.remove(reqId);
                         incrementTaskOverCounter(from);
                         return;
                     }
                 // 构建展示的数据包
-                String displayFrom = isBrowserRequestResponse(newReqResp) ? appendBrowserFrom(from) : from;
+                    boolean browserResult = requestMode == RequestMode.BROWSER || isBrowserRequestResponse(newReqResp);
+                    String displayFrom = browserResult ? appendBrowserFrom(from) : from;
                 TaskData data = buildTaskData(newReqResp, displayFrom);
-                mDataBoardTab.getTaskTable().addTaskData(data);
+                    mDataBoardTab.addTaskData(data, browserResult ? RequestMode.BROWSER : RequestMode.BURP);
                 // 收集数据
                 CollectManager.collect(false, service.getHost(), newReqResp.getResponse());
                 // 处理重定向
@@ -923,7 +1010,10 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         // 将任务添加线程池
         try {
             // 如果是低频任务，使用低频的任务线程池
-            if (isLowFrequencyTask(from)) {
+            if (requestMode == RequestMode.BROWSER) {
+                mBrowserTaskThreadPool.execute(task);
+                mTaskCommitCounter.incrementAndGet();
+            } else if (isLowFrequencyTask(from)) {
                 mLFTaskThreadPool.execute(task);
                 // 低频任务提交计数
                 mLFTaskCommitCounter.incrementAndGet();
@@ -944,7 +1034,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
      * @return true=是；false=否
      */
     private boolean isTaskThreadPoolShutdown() {
-        return mTaskThreadPool.isShutdown() || mLFTaskThreadPool.isShutdown();
+        return mTaskThreadPool.isShutdown() || mLFTaskThreadPool.isShutdown() || mBrowserTaskThreadPool.isShutdown();
     }
 
     /**
@@ -1075,6 +1165,11 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
      * @return 请求响应数据
      */
     private IHttpRequestResponse doMakeHttpRequest(IHttpService service, byte[] reqRawBytes, int retryCount) {
+        return doMakeHttpRequest(service, reqRawBytes, retryCount, RequestMode.AUTO);
+    }
+
+    private IHttpRequestResponse doMakeHttpRequest(IHttpService service, byte[] reqRawBytes, int retryCount,
+                                                   RequestMode requestMode) {
         if (isTaskStopRequested()) {
             Logger.debug("doMakeHttpRequest: task stop requested, intercept task");
             return HttpReqRespAdapter.from(service, reqRawBytes);
@@ -1085,9 +1180,8 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         if (Config.getBoolean(Config.KEY_INTERCEPT_TIMEOUT_HOST) && checkTimeoutByReqHost(reqHost)) {
             return HttpReqRespAdapter.from(service, reqRawBytes);
         }
-        IHttpRequestResponse browserReqResp = doBrowserRequest(service, reqRawBytes);
-        if (browserReqResp != null) {
-            return browserReqResp;
+        if (requestMode == RequestMode.BROWSER) {
+            return doBrowserRequest(service, reqRawBytes, true);
         }
         try {
             reqResp = mCallbacks.makeHttpRequest(service, reqRawBytes);
@@ -1121,7 +1215,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                 return reqResp;
             }
         }
-        return doMakeHttpRequest(service, reqRawBytes, retryCount - 1);
+        return doMakeHttpRequest(service, reqRawBytes, retryCount - 1, requestMode);
     }
 
     /**
@@ -1130,17 +1224,27 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
      * @param reqHost Host（格式：http://x.x.x.x、http://x.x.x.x:8080）
      * @return true=存在；false=不存在
      */
-    private IHttpRequestResponse doBrowserRequest(IHttpService service, byte[] reqRawBytes) {
+    private IHttpRequestResponse doBrowserRequest(IHttpService service, byte[] reqRawBytes, boolean forceBrowser) {
         if (isTaskStopRequested()) {
             Logger.debug("doBrowserRequest: task stop requested, intercept browser request");
             return null;
         }
-        if (!canUseBrowserRequest(service, reqRawBytes)) {
+        if (!canUseBrowserRequest(service, reqRawBytes, forceBrowser)) {
             return null;
         }
         synchronized (mBrowserRequestLock) {
             if (isTaskStopRequested()) {
                 Logger.debug("doBrowserRequest: task stop requested after acquiring browser lock");
+                return null;
+            }
+            try {
+                waitForRequestMode(RequestMode.BROWSER);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return null;
+            }
+            if (isTaskStopRequested()) {
+                Logger.debug("doBrowserRequest: task stop requested after browser pause check");
                 return null;
             }
             try {
@@ -1161,6 +1265,9 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                 return reqResp;
             } catch (Exception e) {
                 Logger.debug("Browser request error: %s", e.getMessage());
+                if (isTaskStopRequested() || mPausedRequestModes.contains(RequestMode.BROWSER)) {
+                    return null;
+                }
                 IHttpRequestResponse reqResp = HttpReqRespAdapter.from(service, reqRawBytes);
                 reqResp.setResponse(buildBrowserErrorResponseBytes(e));
                 reqResp.setComment(FROM_BROWSER);
@@ -1169,8 +1276,8 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         }
     }
 
-    private boolean canUseBrowserRequest(IHttpService service, byte[] reqRawBytes) {
-        if (!Config.getBoolean(Config.KEY_ENABLE_BROWSER_REQUEST)) {
+    private boolean canUseBrowserRequest(IHttpService service, byte[] reqRawBytes, boolean forceBrowser) {
+        if (!forceBrowser && !Config.getBoolean(Config.KEY_ENABLE_BROWSER_REQUEST)) {
             return false;
         }
         IRequestInfo info = mHelpers.analyzeRequest(service, reqRawBytes);
@@ -1315,6 +1422,10 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         String requestKey = buildBrowserRequestKey(httpReqResp);
         if (requestKey == null) {
             return shouldSuppressBrowserProxyTraffic(httpReqResp);
+        }
+        if (mPausedRequestModes.contains(RequestMode.BROWSER)
+                && (mBrowserRequestTasks.containsKey(requestKey) || isExpectedBrowserRequest(requestKey))) {
+            return true;
         }
         BrowserRequestTask task = mBrowserRequestTasks.get(requestKey);
         if (task != null || isExpectedBrowserRequest(requestKey)) {
@@ -2209,7 +2320,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
      *
      * @param list URL 列表
      */
-    private void importUrl(List<?> list) {
+    private void importUrl(List<?> list, RequestMode requestMode) {
         if (list == null || list.isEmpty()) {
             return;
         }
@@ -2220,7 +2331,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                 try {
                     String url = String.valueOf(item);
                     IHttpRequestResponse httpReqResp = HttpReqRespAdapter.from(url);
-                    doScan(httpReqResp, FROM_IMPORT);
+                    doScan(httpReqResp, FROM_IMPORT, requestMode);
                 } catch (IllegalArgumentException e) {
                     Logger.error("Import error: " + e.getMessage());
                 }
@@ -2306,12 +2417,54 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
                 }
                 break;
             case DataBoardTab.EVENT_IMPORT_URL:
-                importUrl((List<?>) params[0]);
+                RequestMode requestMode = params.length > 1 && params[1] instanceof RequestMode
+                        ? (RequestMode) params[1]
+                        : RequestMode.AUTO;
+                importUrl((List<?>) params[0], requestMode);
                 break;
             case DataBoardTab.EVENT_STOP_TASK:
-                stopAllTask();
+                RequestScope stopScope = params.length > 0 && params[0] instanceof RequestScope
+                        ? (RequestScope) params[0]
+                        : RequestScope.ALL;
+                pauseTask(stopScope);
+                break;
+            case DataBoardTab.EVENT_CONTINUE_TASK:
+                RequestScope continueScope = params.length > 0 && params[0] instanceof RequestScope
+                        ? (RequestScope) params[0]
+                        : RequestScope.ALL;
+                continueTask(continueScope);
                 break;
         }
+    }
+
+    private void pauseTask(RequestScope scope) {
+        synchronized (mRequestPauseLock) {
+            if (scope == null || scope == RequestScope.ALL) {
+                mPausedRequestModes.add(RequestMode.BURP);
+                mPausedRequestModes.add(RequestMode.BROWSER);
+                cancelBrowserRequestDriver();
+            } else if (scope == RequestScope.BURP) {
+                mPausedRequestModes.add(RequestMode.BURP);
+            } else if (scope == RequestScope.BROWSER) {
+                mPausedRequestModes.add(RequestMode.BROWSER);
+                cancelBrowserRequestDriver();
+            }
+        }
+        UIHelper.showTipsDialog(L.get("stop_task_tips"));
+    }
+
+    private void continueTask(RequestScope scope) {
+        synchronized (mRequestPauseLock) {
+            if (scope == null || scope == RequestScope.ALL) {
+                mPausedRequestModes.clear();
+            } else if (scope == RequestScope.BURP) {
+                mPausedRequestModes.remove(RequestMode.BURP);
+            } else if (scope == RequestScope.BROWSER) {
+                mPausedRequestModes.remove(RequestMode.BROWSER);
+            }
+            mRequestPauseLock.notifyAll();
+        }
+        UIHelper.showTipsDialog(L.get("continue_task_tips"));
     }
 
     /**
@@ -2322,10 +2475,16 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         // 关闭线程池，处理未执行的任务
         List<Runnable> taskList = mTaskThreadPool.shutdownNow();
         List<Runnable> lfTaskList = mLFTaskThreadPool.shutdownNow();
+        List<Runnable> browserTaskList = mBrowserTaskThreadPool.shutdownNow();
         cancelBrowserRequestDriver();
         handleStopTasks(taskList);
         handleStopTasks(lfTaskList);
+        handleStopTasks(browserTaskList);
         clearBrowserRequestTasks();
+        synchronized (mRequestPauseLock) {
+            mPausedRequestModes.clear();
+            mRequestPauseLock.notifyAll();
+        }
         sRepeatFilter.clear();
         sTimeoutReqHost.clear();
         // 提示信息
@@ -2334,6 +2493,7 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         mTaskThreadPool = Executors.newFixedThreadPool(TASK_THREAD_COUNT);
         // 停止后，重新初始化低频任务线程池
         mLFTaskThreadPool = Executors.newFixedThreadPool(LF_TASK_THREAD_COUNT);
+        mBrowserTaskThreadPool = Executors.newSingleThreadExecutor();
         // 重新初始化 QPS 限制器
         initQpsLimiter();
         closeBrowserRequestDriverAsync();
@@ -2389,6 +2549,8 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         // 关闭低频任务线程池
         count = mLFTaskThreadPool.shutdownNow().size();
         Logger.info("Close: low frequency task thread pool completed. Task %d records.", count);
+        count = mBrowserTaskThreadPool.shutdownNow().size();
+        Logger.info("Close: browser task thread pool completed. Task %d records.", count);
         // 关闭指纹识别线程池
         count = mFpThreadPool.shutdownNow().size();
         Logger.info("Close: fingerprint recognition thread pool completed. Task %d records.", count);
@@ -2427,9 +2589,11 @@ public class BurpExtender implements IBurpExtender, IProxyListener, IMessageEdit
         // 清除任务列表
         count = 0;
         if (mDataBoardTab != null) {
-            TaskTable taskTable = mDataBoardTab.getTaskTable();
-            if (taskTable != null) {
-                count = taskTable.getTaskCount();
+            for (TaskTable taskTable : mDataBoardTab.getTaskTables()) {
+                if (taskTable == null) {
+                    continue;
+                }
+                count += taskTable.getTaskCount();
                 taskTable.clearAll();
             }
             mDataBoardTab.closeAutoSaveTimer();

@@ -675,6 +675,10 @@ public class TaskTable extends JTable implements ActionListener {
         mTaskTableModel.stopAddTaskData();
     }
 
+    public void startAddTaskData() {
+        mTaskTableModel.startAddTaskData();
+    }
+
     /**
      * 获取扫描任务的数量
      */
@@ -952,6 +956,11 @@ public class TaskTable extends JTable implements ActionListener {
 
         public void stopAddTaskData() {
             // 任务停止后。取出所有队列数据，添加到列表
+            mItemLoader.flush();
+        }
+
+        public void startAddTaskData() {
+            // DataTableItemLoader 会在新数据入队时自动恢复，这里只刷新一次当前队列。
             mItemLoader.flush();
         }
     }

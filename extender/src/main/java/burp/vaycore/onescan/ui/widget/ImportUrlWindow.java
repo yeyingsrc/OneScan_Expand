@@ -7,6 +7,7 @@ import burp.vaycore.common.utils.StringUtils;
 import burp.vaycore.common.utils.UrlUtils;
 import burp.vaycore.common.widget.HintTextField;
 import burp.vaycore.onescan.common.L;
+import burp.vaycore.onescan.common.RequestMode;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
@@ -25,6 +26,7 @@ public class ImportUrlWindow extends JPanel implements ActionListener {
     private HintTextField mTextField;
     private SimpleWordlist mWordlist;
     private JCheckBox mKeepData;
+    private JComboBox<RequestModeItem> mRequestMode;
     private JFrame mFrame;
     private OnImportUrlListener mOnImportUrlListener;
 
@@ -51,6 +53,12 @@ public class ImportUrlWindow extends JPanel implements ActionListener {
         bottomPanel.setBorder(new EmptyBorder(10, 0, 5, 0));
         mKeepData = new JCheckBox(L.get("retain_data"));
         bottomPanel.add(mKeepData);
+        mRequestMode = new JComboBox<>(new RequestModeItem[]{
+                new RequestModeItem(L.get("request_mode_burp"), RequestMode.BURP),
+                new RequestModeItem(L.get("request_mode_browser"), RequestMode.BROWSER)
+        });
+        mRequestMode.setToolTipText(L.get("request_mode"));
+        bottomPanel.add(mRequestMode);
         bottomPanel.add(new JPanel(), "1w");
         JButton scanBtn = newButton(L.get("start_scan"), "scan-action");
         bottomPanel.add(scanBtn);
@@ -123,7 +131,7 @@ public class ImportUrlWindow extends JPanel implements ActionListener {
             }
         }
         // 调用监听器
-        invokeOnImportUrlListener(data);
+        invokeOnImportUrlListener(data, getRequestMode());
         // 提示导入成功
         UIHelper.showTipsDialog(L.get("import_url_success_hint"), this);
         return true;
@@ -134,10 +142,17 @@ public class ImportUrlWindow extends JPanel implements ActionListener {
      *
      * @param data 导入的 URL 数据
      */
-    private void invokeOnImportUrlListener(List<String> data) {
+    private void invokeOnImportUrlListener(List<String> data, RequestMode requestMode) {
         if (mOnImportUrlListener != null) {
-            this.mOnImportUrlListener.onImportUrl(data);
+            this.mOnImportUrlListener.onImportUrl(data, requestMode);
         }
+    }
+
+    private RequestMode getRequestMode() {
+        if (mRequestMode == null || !(mRequestMode.getSelectedItem() instanceof RequestModeItem item)) {
+            return RequestMode.BURP;
+        }
+        return item.value;
     }
 
     /**
@@ -204,6 +219,22 @@ public class ImportUrlWindow extends JPanel implements ActionListener {
          *
          * @param data 字典数据
          */
-        void onImportUrl(List<String> data);
+        void onImportUrl(List<String> data, RequestMode requestMode);
+    }
+
+    private static class RequestModeItem {
+
+        private final String label;
+        private final RequestMode value;
+
+        private RequestModeItem(String label, RequestMode value) {
+            this.label = label;
+            this.value = value;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
     }
 }

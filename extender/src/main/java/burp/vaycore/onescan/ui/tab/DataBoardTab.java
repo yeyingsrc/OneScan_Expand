@@ -11,10 +11,7 @@ import burp.vaycore.common.utils.Utils;
 import burp.vaycore.common.widget.HintTextField;
 import burp.vaycore.onescan.bean.FpData;
 import burp.vaycore.onescan.bean.TaskData;
-import burp.vaycore.onescan.common.Config;
-import burp.vaycore.onescan.common.DialogCallbackAdapter;
-import burp.vaycore.onescan.common.L;
-import burp.vaycore.onescan.common.OnFpColumnModifyListener;
+import burp.vaycore.onescan.common.*;
 import burp.vaycore.onescan.manager.FpManager;
 import burp.vaycore.onescan.manager.TaskPersistenceManager;
 import burp.vaycore.onescan.ui.base.BaseTab;
@@ -35,37 +32,39 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * 数据看板
- * <p>
- * Created by vaycore on 2022-08-07.
- */
-public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrlListener, OnFpColumnModifyListener, ActionListener {
+public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrlListener, OnFpColumnModifyListener,
+        ActionListener {
 
     public static final String EVENT_IMPORT_URL = "event-import-url";
     public static final String EVENT_STOP_TASK = "event-stop-task";
+    public static final String EVENT_CONTINUE_TASK = "event-continue-task";
 
-    private TaskTable mTaskTable;
+    private TaskTable mBurpTaskTable;
+    private TaskTable mBrowserTaskTable;
+    private JTabbedPane mTaskTabbedPane;
     private JCheckBox mListenProxyMessage;
-    private JCheckBox mRemoveHeader;
-    private JCheckBox mReplaceHeader;
+    private AbstractButton mRemoveHeader;
+    private AbstractButton mReplaceHeader;
     private JCheckBox mDirScan;
     private ArrayList<FilterRule> mLastFilters;
     private HintTextField mFilterRuleText;
-    private JCheckBox mPayloadProcessing;
+    private AbstractButton mPayloadProcessing;
+    private JPopupMenu mRequestProcessingMenu;
     private ImportUrlWindow mImportUrlWindow;
+    private JComboBox<RequestScopeItem> mTaskControlScope;
+    private Boolean mListenProxyMessageBeforePause;
     private JLabel mTaskStatus;
     private JLabel mLFTaskStatus;
     private JLabel mFpCacheStatus;
     private JLabel mTaskHistoryStatus;
     private Timer mAutoSaveTimer;
     private long mLastAutoSavedVersion = -1L;
+    private long mLastAutoSaveQueuedVersion = -1L;
     private final ExecutorService mSaveExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "OneScan-data-save");
         thread.setDaemon(true);
         return thread;
     });
-    private long mLastAutoSaveQueuedVersion = -1L;
 
     @Override
     protected void initData() {
@@ -82,13 +81,12 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
 
     public void testInit() {
         init(new JTextArea(L.get("request")), new JTextArea(L.get("response")));
-        // 添加测试数据
         for (int i = 0; i < 100; i++) {
             TaskData data = new TaskData();
             data.setMethod(i % 12 == 0 ? "POST" : "GET");
             data.setHost("https://www.baidu.com");
             data.setUrl("/?s=" + i);
-            data.setTitle("百度一下，你就知道");
+            data.setTitle("baidu");
             data.setIp(IPUtils.randomIPv4());
             data.setStatus(200);
             data.setLength(Utils.randomInt(99999));
@@ -100,7 +98,7 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
             }
             data.setFrom("Proxy");
             data.setReqResp(new Object());
-            getTaskTable().addTaskData(data);
+            addTaskData(data, i % 2 == 0 ? RequestMode.BURP : RequestMode.BROWSER);
         }
     }
 
@@ -109,81 +107,93 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
             return;
         }
         setLayout(new VLayout(0));
-        // 初始化控制栏
         initControlPanel();
-        // 主面板
+
         JSplitPane mainSplitPanel = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
         mainSplitPanel.setResizeWeight(0.55D);
         mainSplitPanel.setDividerSize(3);
-        // 请求列表
-        mTaskTable = new TaskTable();
-        JScrollPane scrollPane = new JScrollPane(mTaskTable);
-        scrollPane.setPreferredSize(new Dimension(scrollPane.getWidth(), 0));
-        // 请求和响应面板
+
+        mBurpTaskTable = new TaskTable();
+        mBrowserTaskTable = new TaskTable();
+        mTaskTabbedPane = new JTabbedPane();
+        mTaskTabbedPane.addTab(L.get("request_scope_burp"), new JScrollPane(mBurpTaskTable));
+        mTaskTabbedPane.addTab(L.get("request_scope_browser"), new JScrollPane(mBrowserTaskTable));
+        mTaskTabbedPane.addChangeListener(e -> refreshTaskHistoryStatus());
+        mTaskTabbedPane.setPreferredSize(new Dimension(mTaskTabbedPane.getWidth(), 0));
+
         JSplitPane dataSplitPanel = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT);
         dataSplitPanel.setResizeWeight(0.5D);
         dataSplitPanel.setDividerSize(3);
         dataSplitPanel.add(requestTextEditor, JSplitPane.LEFT);
         dataSplitPanel.add(responseTextEditor, JSplitPane.RIGHT);
-        // 添加子面板控件
-        mainSplitPanel.add(scrollPane, JSplitPane.LEFT);
+
+        mainSplitPanel.add(mTaskTabbedPane, JSplitPane.LEFT);
         mainSplitPanel.add(dataSplitPanel, JSplitPane.RIGHT);
-        // 将布局进行展示
         add(mainSplitPanel, "1w");
-        // 状态栏
+
         initStatusPanel();
-        // 加载过滤规则
         loadFilterRules();
     }
 
-    /**
-     * 初始化控制栏
-     */
     private void initControlPanel() {
         JPanel panel = new JPanel(new HLayout(5, true));
         panel.setBorder(new EmptyBorder(0, 0, 0, 5));
         panel.setFocusable(false);
         add(panel);
-        // 代理监听开关
+
         mListenProxyMessage = newJCheckBox(panel, L.get("listen_proxy"), Config.KEY_ENABLE_LISTEN_PROXY);
-        // 请求头移除开关
-        mRemoveHeader = newJCheckBox(panel, L.get("remove_header"), Config.KEY_ENABLE_REMOVE_HEADER);
-        // 请求头替换开关
-        mReplaceHeader = newJCheckBox(panel, L.get("replace_header"), Config.KEY_ENABLE_REPLACE_HEADER);
-        // 递归扫描开关
         mDirScan = newJCheckBox(panel, L.get("dir_scan"), Config.KEY_ENABLE_DIR_SCAN);
-        // 请求包处理开关
-        mPayloadProcessing = newJCheckBox(panel, L.get("databoard_payload_processing"),
-                Config.KEY_ENABLE_PAYLOAD_PROCESSING);
-        // 导入Url
+
+        initRequestProcessingMenu();
+        JButton requestProcessingBtn = new JButton(L.get("request_processing"));
+        requestProcessingBtn.setToolTipText(L.get("request_processing"));
+        requestProcessingBtn.addActionListener(e -> showRequestProcessingMenu(requestProcessingBtn));
+        panel.add(requestProcessingBtn);
+
         JButton importUrlBtn = new JButton(L.get("import_url"));
         importUrlBtn.setToolTipText(L.get("import_url"));
         importUrlBtn.setActionCommand("import-url");
         importUrlBtn.addActionListener(this);
         panel.add(importUrlBtn);
-        // 停止按钮
+
+        mTaskControlScope = new JComboBox<>(new RequestScopeItem[]{
+                new RequestScopeItem(L.get("request_scope_all"), RequestScope.ALL),
+                new RequestScopeItem(L.get("request_scope_burp"), RequestScope.BURP),
+                new RequestScopeItem(L.get("request_scope_browser"), RequestScope.BROWSER)
+        });
+        mTaskControlScope.setToolTipText(L.get("request_scope"));
+        panel.add(mTaskControlScope);
+
         JButton stopBtn = new JButton(L.get("stop"));
         stopBtn.setToolTipText(L.get("stop_all_task"));
         stopBtn.setActionCommand("stop-task");
         stopBtn.addActionListener(this);
         panel.add(stopBtn);
-        // 清空历史记录按钮
+
+        JButton continueBtn = new JButton(L.get("continue_task"));
+        continueBtn.setToolTipText(L.get("continue_task"));
+        continueBtn.setActionCommand("continue-task");
+        continueBtn.addActionListener(this);
+        panel.add(continueBtn);
+
         JButton clearBtn = new JButton(L.get("clear_record"));
         clearBtn.setToolTipText(L.get("clear_history"));
         clearBtn.setActionCommand("clear-history");
         clearBtn.addActionListener(this);
         panel.add(clearBtn);
+
         JButton dataProcessingBtn = new JButton(L.get("data_processing"));
         dataProcessingBtn.setToolTipText(L.get("data_processing"));
         dataProcessingBtn.addActionListener(e -> showDataProcessingMenu(dataProcessingBtn));
         panel.add(dataProcessingBtn);
-        // 撑开布局
+
         panel.add(new JPanel(), "1w");
-        // 过滤设置
+
         mFilterRuleText = new HintTextField();
         mFilterRuleText.setEditable(false);
         mFilterRuleText.setHintText(L.get("no_filter_rules"));
         panel.add(mFilterRuleText, "2w");
+
         JButton filterBtn = new JButton(L.get("filter"));
         filterBtn.setToolTipText(L.get("filter_data"));
         filterBtn.setActionCommand("filter-data");
@@ -191,9 +201,6 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         panel.add(filterBtn, "65px");
     }
 
-    /**
-     * 初始化状态栏
-     */
     private void initStatusPanel() {
         add(DividerLine.h());
         JPanel panel = new JPanel(new HLayout(10));
@@ -201,58 +208,38 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         panel.setFocusable(false);
         panel.add(new JPanel(), "1w");
         add(panel);
-        // 添加状态信息组件
+
         mTaskStatus = addStatusInfoPanel(panel);
         mLFTaskStatus = addStatusInfoPanel(panel);
         mTaskHistoryStatus = addStatusInfoPanel(panel);
         mFpCacheStatus = addStatusInfoPanel(panel);
-        // 刷新默认显示的信息
+
         refreshTaskStatus(0, 0);
         refreshLFTaskStatus(0, 0);
         refreshTaskHistoryStatus();
         refreshFpCacheStatus();
     }
 
-    /**
-     * 添加状态信息组件
-     *
-     * @param panel 状态栏布局
-     * @return 返回 JLabel 组件
-     */
     private JLabel addStatusInfoPanel(JPanel panel) {
-        // 分隔线
         panel.add(DividerLine.v());
-        // 显示的内容
         JLabel label = new JLabel();
         panel.add(label);
         return label;
     }
 
-    /**
-     * 从配置文件中加载过滤规则
-     */
     private void loadFilterRules() {
         ArrayList<FilterRule> rules = Config.getDataboardFilterRules();
         if (rules == null) {
             return;
         }
-        // 借助 TableFilterPanel 组件转换配置
         TableFilterPanel panel = new TableFilterPanel(TaskTable.getColumnNames(), rules);
         ArrayList<TableFilter<AbstractTableModel>> filters = panel.exportTableFilters();
         String rulesText = panel.exportRulesText();
-        mTaskTable.setRowFilter(filters);
+        setRowFilterForAll(filters);
         mFilterRuleText.setText(rulesText);
         mLastFilters = rules;
     }
 
-    /**
-     * 创建开关组件
-     *
-     * @param panel     控制栏布局
-     * @param text      开关标签
-     * @param configKey 要绑定的配置 key
-     * @return 开关组件实例
-     */
     private JCheckBox newJCheckBox(JPanel panel, String text, String configKey) {
         JCheckBox checkBox = new JCheckBox(text, Config.getBoolean(configKey));
         checkBox.setFocusable(false);
@@ -261,13 +248,40 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         checkBox.addActionListener(e -> {
             boolean configSelected = Config.getBoolean(configKey);
             boolean selected = checkBox.isSelected();
-            if (selected == configSelected) {
-                return;
+            if (selected != configSelected) {
+                Config.put(configKey, String.valueOf(selected));
             }
-            // 保存配置
-            Config.put(configKey, String.valueOf(selected));
         });
         return checkBox;
+    }
+
+    private void initRequestProcessingMenu() {
+        mRequestProcessingMenu = new JPopupMenu();
+        mRemoveHeader = newRequestProcessingMenuItem(L.get("remove_header"), Config.KEY_ENABLE_REMOVE_HEADER);
+        mReplaceHeader = newRequestProcessingMenuItem(L.get("replace_header"), Config.KEY_ENABLE_REPLACE_HEADER);
+        mPayloadProcessing = newRequestProcessingMenuItem(L.get("databoard_payload_processing"),
+                Config.KEY_ENABLE_PAYLOAD_PROCESSING);
+        mRequestProcessingMenu.add(mRemoveHeader);
+        mRequestProcessingMenu.add(mReplaceHeader);
+        mRequestProcessingMenu.add(mPayloadProcessing);
+    }
+
+    private JCheckBoxMenuItem newRequestProcessingMenuItem(String text, String configKey) {
+        JCheckBoxMenuItem item = new JCheckBoxMenuItem(text, Config.getBoolean(configKey));
+        item.addActionListener(e -> {
+            boolean configSelected = Config.getBoolean(configKey);
+            boolean selected = item.isSelected();
+            if (selected != configSelected) {
+                Config.put(configKey, String.valueOf(selected));
+            }
+        });
+        return item;
+    }
+
+    private void showRequestProcessingMenu(Component anchor) {
+        if (mRequestProcessingMenu != null) {
+            mRequestProcessingMenu.show(anchor, 0, anchor.getHeight());
+        }
     }
 
     @Override
@@ -278,6 +292,9 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
                 break;
             case "stop-task":
                 stopTask();
+                break;
+            case "continue-task":
+                continueTask();
                 break;
             case "clear-history":
                 clearHistory();
@@ -316,9 +333,6 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         menu.add(item);
     }
 
-    /**
-     * 显示导入 URL 窗口
-     */
     private void importUrl() {
         if (mImportUrlWindow == null) {
             mImportUrlWindow = new ImportUrlWindow();
@@ -327,9 +341,6 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         mImportUrlWindow.showWindow();
     }
 
-    /**
-     * 关闭导入 URL 窗口
-     */
     public void closeImportUrlWindow() {
         if (mImportUrlWindow != null) {
             mImportUrlWindow.closeWindow();
@@ -337,51 +348,63 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
     }
 
     @Override
-    public void onImportUrl(List<String> data) {
+    public void onImportUrl(List<String> data, RequestMode requestMode) {
         if (data == null || data.isEmpty()) {
             return;
         }
-        sendTabEvent(EVENT_IMPORT_URL, data);
+        sendTabEvent(EVENT_IMPORT_URL, data, requestMode);
     }
 
     @Override
     public void onFpColumnModify() {
-        if (mTaskTable != null) {
-            mTaskTable.refreshColumns();
+        for (TaskTable table : getTaskTables()) {
+            table.refreshColumns();
         }
     }
 
-    /**
-     * 停止扫描任务
-     */
     private void stopTask() {
-        // 停止任务前，优先将代理监听开关关闭
-        mListenProxyMessage.setSelected(false);
-        // 发送事件消息
-        sendTabEvent(EVENT_STOP_TASK);
-        // 通知停止添加任务数据
-        if (mTaskTable != null) {
-            mTaskTable.stopAddTaskData();
+        RequestScope scope = getTaskControlScope();
+        if (scope == RequestScope.ALL || scope == RequestScope.BURP) {
+            if (mListenProxyMessage != null) {
+                mListenProxyMessageBeforePause = mListenProxyMessage.isSelected();
+                mListenProxyMessage.setSelected(false);
+            }
         }
+        sendTabEvent(EVENT_STOP_TASK, scope);
+        forEachTableByScope(scope, TaskTable::stopAddTaskData);
     }
 
-    /**
-     * 清空历史记录
-     */
+    private void continueTask() {
+        RequestScope scope = getTaskControlScope();
+        if ((scope == RequestScope.ALL || scope == RequestScope.BURP)
+                && mListenProxyMessageBeforePause != null
+                && mListenProxyMessage != null) {
+            mListenProxyMessage.setSelected(mListenProxyMessageBeforePause);
+            mListenProxyMessageBeforePause = null;
+        }
+        sendTabEvent(EVENT_CONTINUE_TASK, scope);
+        forEachTableByScope(scope, TaskTable::startAddTaskData);
+    }
+
+    private RequestScope getTaskControlScope() {
+        if (mTaskControlScope == null || !(mTaskControlScope.getSelectedItem() instanceof RequestScopeItem item)) {
+            return RequestScope.ALL;
+        }
+        return item.value;
+    }
+
     private void clearHistory() {
-        if (mTaskTable == null) {
+        TaskTable table = getTaskTable();
+        if (table == null) {
             return;
         }
-        mTaskTable.clearAll();
+        table.clearAll();
         refreshTaskHistoryStatus();
     }
 
     private void saveStoredData(boolean showTips) {
-        if (mTaskTable == null) {
-            return;
-        }
         try {
-            TaskTable.TaskSnapshot snapshot = mTaskTable.getTaskSnapshot();
+            TaskSnapshot snapshot = getPersistSnapshot(showTips);
             if (!showTips && snapshot.version() == mLastAutoSavedVersion) {
                 return;
             }
@@ -402,13 +425,7 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
                 try {
                     TaskPersistenceManager.SaveResult result = TaskPersistenceManager.persistSnapshot(items);
                     if (showTips) {
-                        SwingUtilities.invokeLater(() -> {
-                            if (result.count() <= 0) {
-                                UIHelper.showTipsDialog(L.get("data_persistence_disabled_hint"));
-                            } else {
-                                UIHelper.showTipsDialog(L.get("save_stored_data_success", result.label(), result.count()));
-                            }
-                        });
+                        SwingUtilities.invokeLater(() -> showSaveResult(result));
                     } else {
                         mLastAutoSavedVersion = snapshot.version();
                         mLastAutoSaveQueuedVersion = snapshot.version();
@@ -427,6 +444,14 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
             if (showTips) {
                 UIHelper.showTipsDialog(L.get("error_hint", ex.getMessage()));
             }
+        }
+    }
+
+    private void showSaveResult(TaskPersistenceManager.SaveResult result) {
+        if (result.count() <= 0) {
+            UIHelper.showTipsDialog(L.get("data_persistence_disabled_hint"));
+        } else {
+            UIHelper.showTipsDialog(L.get("save_stored_data_success", result.label(), result.count()));
         }
     }
 
@@ -453,6 +478,10 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
     }
 
     private void importStoredData() {
+        TaskTable table = getTaskTable();
+        if (table == null) {
+            return;
+        }
         try {
             List<TaskPersistenceManager.HistoryLabel> labels = TaskPersistenceManager.listLabels();
             if (labels.isEmpty()) {
@@ -475,7 +504,7 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
                 return;
             }
             List<TaskData> items = TaskPersistenceManager.loadTaskDataByLabel(selected.label());
-            mTaskTable.loadTaskData(items);
+            table.loadTaskData(items);
             refreshTaskHistoryStatus();
             UIHelper.showTipsDialog(L.get("import_stored_data_success", selected.label(), items.size()));
         } catch (Exception ex) {
@@ -483,97 +512,123 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         }
     }
 
-    /**
-     * 获取任务表格组件
-     */
-    public TaskTable getTaskTable() {
-        return mTaskTable;
+    public void addTaskData(TaskData data, RequestMode requestMode) {
+        TaskTable table = requestMode == RequestMode.BROWSER ? mBrowserTaskTable : mBurpTaskTable;
+        if (table != null) {
+            table.addTaskData(data);
+        }
     }
 
-    /**
-     * 是否开启监听代理请求开关
-     */
+    public TaskTable getTaskTable() {
+        if (mTaskTabbedPane != null && mTaskTabbedPane.getSelectedIndex() == 1) {
+            return mBrowserTaskTable;
+        }
+        return mBurpTaskTable;
+    }
+
+    private TaskSnapshot getPersistSnapshot(boolean currentTableOnly) {
+        if (currentTableOnly) {
+            TaskTable table = getTaskTable();
+            if (table == null) {
+                return new TaskSnapshot(new ArrayList<>(), -1L);
+            }
+            TaskTable.TaskSnapshot snapshot = table.getTaskSnapshot();
+            return new TaskSnapshot(snapshot.items(), snapshot.version());
+        }
+        ArrayList<TaskData> items = new ArrayList<>();
+        long version = 0L;
+        for (TaskTable table : getTaskTables()) {
+            TaskTable.TaskSnapshot snapshot = table.getTaskSnapshot();
+            items.addAll(snapshot.items());
+            version = 31L * version + snapshot.version();
+        }
+        return new TaskSnapshot(items, version);
+    }
+
+    public TaskTable getBurpTaskTable() {
+        return mBurpTaskTable;
+    }
+
+    public TaskTable getBrowserTaskTable() {
+        return mBrowserTaskTable;
+    }
+
+    public List<TaskTable> getTaskTables() {
+        ArrayList<TaskTable> tables = new ArrayList<>();
+        if (mBurpTaskTable != null) {
+            tables.add(mBurpTaskTable);
+        }
+        if (mBrowserTaskTable != null) {
+            tables.add(mBrowserTaskTable);
+        }
+        return tables;
+    }
+
+    private void forEachTableByScope(RequestScope scope, TableAction action) {
+        if (action == null) {
+            return;
+        }
+        if ((scope == null || scope == RequestScope.ALL || scope == RequestScope.BURP) && mBurpTaskTable != null) {
+            action.accept(mBurpTaskTable);
+        }
+        if ((scope == null || scope == RequestScope.ALL || scope == RequestScope.BROWSER) && mBrowserTaskTable != null) {
+            action.accept(mBrowserTaskTable);
+        }
+    }
+
+    private void setRowFilterForAll(ArrayList<TableFilter<AbstractTableModel>> filters) {
+        for (TaskTable table : getTaskTables()) {
+            table.setRowFilter(filters);
+        }
+    }
+
     public boolean hasListenProxyMessage() {
         return mListenProxyMessage != null && mListenProxyMessage.isSelected();
     }
 
-    /**
-     * 是否开启移除请求头开关
-     */
     public boolean hasRemoveHeader() {
         return mRemoveHeader != null && mRemoveHeader.isSelected();
     }
 
-    /**
-     * 是否开启替换请求头开关
-     */
     public boolean hasReplaceHeader() {
         return mReplaceHeader != null && mReplaceHeader.isSelected();
     }
 
-    /**
-     * 是否开启目录扫描开关
-     */
     public boolean hasDirScan() {
         return mDirScan != null && mDirScan.isSelected();
     }
 
-    /**
-     * 是否开启请求包处理开关
-     */
     public boolean hasPayloadProcessing() {
         return mPayloadProcessing != null && mPayloadProcessing.isSelected();
     }
 
-    /**
-     * 刷新任务状态
-     *
-     * @param over   任务完成数量
-     * @param commit 任务提交数量
-     */
     public void refreshTaskStatus(int over, int commit) {
-        if (mTaskTable == null) {
-            return;
+        if (mTaskStatus != null) {
+            mTaskStatus.setText(L.get("status_bar_task", over, commit));
         }
-        String message = L.get("status_bar_task", over, commit);
-        mTaskStatus.setText(message);
     }
 
-    /**
-     * 刷新低频任务状态
-     *
-     * @param over   任务完成数量
-     * @param commit 任务提交数量
-     */
     public void refreshLFTaskStatus(int over, int commit) {
-        if (mLFTaskStatus == null) {
-            return;
+        if (mLFTaskStatus != null) {
+            mLFTaskStatus.setText(L.get("status_bar_low_frequency_task", over, commit));
         }
-        String message = L.get("status_bar_low_frequency_task", over, commit);
-        mLFTaskStatus.setText(message);
     }
 
-    /**
-     * 刷新任务状态
-     */
     public void refreshTaskHistoryStatus() {
-        if (mTaskHistoryStatus == null || mTaskTable == null) {
+        if (mTaskHistoryStatus == null) {
             return;
         }
-        int count = mTaskTable.getTaskCount();
-        String message = L.get("status_bar_task_history", count);
-        mTaskHistoryStatus.setText(message);
+        int count = 0;
+        for (TaskTable table : getTaskTables()) {
+            count += table.getTaskCount();
+        }
+        mTaskHistoryStatus.setText(L.get("status_bar_task_history", count));
     }
 
-    /**
-     * 刷新指纹缓存状态
-     */
     public void refreshFpCacheStatus() {
-        if (mFpCacheStatus == null) {
-            return;
+        if (mFpCacheStatus != null) {
+            mFpCacheStatus.setText(L.get("status_bar_fingerprint_cache", FpManager.getCacheCount()));
         }
-        String message = L.get("status_bar_fingerprint_cache", FpManager.getCacheCount());
-        mFpCacheStatus.setText(message);
     }
 
     public void refreshAutoSaveTimer() {
@@ -610,16 +665,15 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
         mSaveExecutor.shutdownNow();
     }
 
-    /**
-     * 设置过滤对话框
-     */
     private void showSetupFilterDialog() {
         TableFilterPanel panel = new TableFilterPanel(TaskTable.getColumnNames(), mLastFilters);
         panel.showDialog(new DialogCallbackAdapter() {
 
             @Override
-            public void onConfirm(ArrayList<FilterRule> filterRules, ArrayList<TableFilter<AbstractTableModel>> filters, String rulesText) {
-                mTaskTable.setRowFilter(filters);
+            public void onConfirm(ArrayList<FilterRule> filterRules,
+                                  ArrayList<TableFilter<AbstractTableModel>> filters,
+                                  String rulesText) {
+                setRowFilterForAll(filters);
                 mFilterRuleText.setText(rulesText);
                 mLastFilters = filterRules;
                 Config.put(Config.KEY_DATABOARD_FILTER_RULES, filterRules);
@@ -627,11 +681,34 @@ public class DataBoardTab extends BaseTab implements ImportUrlWindow.OnImportUrl
 
             @Override
             public void onReset() {
-                mTaskTable.setRowFilter(null);
+                setRowFilterForAll(null);
                 mFilterRuleText.setText("");
                 mLastFilters = null;
                 Config.put(Config.KEY_DATABOARD_FILTER_RULES, new ArrayList<>());
             }
         });
+    }
+
+    private interface TableAction {
+        void accept(TaskTable table);
+    }
+
+    private record TaskSnapshot(List<TaskData> items, long version) {
+    }
+
+    private static class RequestScopeItem {
+
+        private final String label;
+        private final RequestScope value;
+
+        private RequestScopeItem(String label, RequestScope value) {
+            this.label = label;
+            this.value = value;
+        }
+
+        @Override
+        public String toString() {
+            return label;
+        }
     }
 }

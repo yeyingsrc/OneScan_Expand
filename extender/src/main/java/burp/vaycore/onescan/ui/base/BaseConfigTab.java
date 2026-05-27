@@ -110,12 +110,12 @@ public abstract class BaseConfigTab extends BaseTab {
     }
 
     /**
-     * 娣诲姞鏂囦欢閰嶇疆椤?
+     * 添加文件配置项
      *
-     * @param title     閰嶇疆椤规爣棰?
-     * @param subTitle  閰嶇疆椤硅鏄?
-     * @param configKey 閰嶇疆鏂囦欢涓殑 Key
-     * @param editable  鏄惁鍏佽鎵嬪姩缂栬緫璺緞
+     * @param title     配置项标题
+     * @param subTitle  配置项说明
+     * @param configKey 配置文件中的 Key
+     * @param editable  是否允许手动编辑路径
      */
     protected void addFileConfigPanel(String title, String subTitle, String configKey, boolean editable) {
         JPanel panel = new JPanel(new HLayout(3));
